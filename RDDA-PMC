@@ -1,0 +1,544 @@
+import networkx as nx
+import itertools
+import random
+from collections import deque
+import time
+
+
+def generate_3_ary_n_cube(n):
+    k = 3
+    vertices = list(itertools.product(range(k), repeat=n))
+
+    G = nx.Graph()
+    for vertex in vertices:
+        G.add_node(vertex)
+
+    for vertex in vertices:
+        for dim in range(n):
+            # +1 mod 3
+            neighbor_plus = list(vertex)
+            neighbor_plus[dim] = (neighbor_plus[dim] + 1) % k
+            neighbor_plus = tuple(neighbor_plus)
+
+            # -1 mod 3
+            neighbor_minus = list(vertex)
+            neighbor_minus[dim] = (neighbor_minus[dim] - 1) % k
+            neighbor_minus = tuple(neighbor_minus)
+
+            if not G.has_edge(vertex, neighbor_plus):
+                G.add_edge(vertex, neighbor_plus)
+            if not G.has_edge(vertex, neighbor_minus):
+                G.add_edge(vertex, neighbor_minus)
+
+    return G
+
+
+def is_h_extra_r_component_cut(graph, fault_set, h, r):
+    temp_graph = graph.copy()
+    temp_graph.remove_nodes_from(fault_set)
+    components = list(nx.connected_components(temp_graph))
+    if len(components) < 2:
+        return False
+    if len(components) < r:
+        return False
+    for component in components:
+        if len(component) < h + 1:
+            return False
+
+    return True
+
+
+def find_h_extra_r_component_cut(graph, num_faults, h, r, max_attempts=1000):
+    nodes = list(graph.nodes())
+
+    for attempt in range(max_attempts):
+        fault_set = set(random.sample(nodes, num_faults))
+        if is_h_extra_r_component_cut(graph, fault_set, h, r):
+            return fault_set
+    return None
+
+
+def initialize_fault_set_with_condition(graph, num_faults, h, r, verbose=False):
+    if verbose:
+        print(f"正在寻找满足h={h}, r={r}条件的故障节点集合...")
+
+    fault_set = find_h_extra_r_component_cut(graph, num_faults, h, r)
+
+    if fault_set is None:
+        if verbose:
+            print(f"警告: 无法找到满足h={h}, r={r}条件的故障节点集合，使用随机故障集")
+        nodes = list(graph.nodes())
+        fault_set = set(random.sample(nodes, num_faults))
+    else:
+        if verbose:
+            print(f"成功找到满足条件的故障节点集合，包含 {len(fault_set)} 个节点")
+
+    return fault_set
+
+
+def pmc_test(tester, testee, fault_set):
+    if tester in fault_set:
+        return random.choice([0, 1])
+    if testee in fault_set:
+        return 1  # 检测到故障
+    else:
+        return 0  # 无故障
+
+
+def pmc_test_with_error(tester, testee, fault_set, error_rate=0.01):
+
+    if random.random() < error_rate:
+        return random.choice([0, 1])
+
+    # 原有逻辑
+    return pmc_test(tester, testee, fault_set)
+
+
+def is_node_faulty(node, fault_set, fault_level):
+    if node in fault_set:
+        return random.random() < fault_level  # 按故障级别随机返回
+    return False
+
+
+def has_all_faulty_neighbors(node, fault_set, graph):
+    neighbors = list(graph.neighbors(node))
+    if not neighbors:  # 如果没有邻居
+        return False
+
+    return all(neighbor in fault_set for neighbor in neighbors)
+
+
+def initialize_fault_set(graph, num_faults):
+    nodes = list(graph.nodes())
+
+    # 简单随机选择故障节点，不添加任何约束
+    fault_set = set(random.sample(nodes, num_faults))
+
+    return fault_set
+
+
+def find_reliable_pair(graph, fault_set, max_attempts=100, verbose=False):
+
+    nodes = list(graph.nodes())
+
+    for attempt in range(max_attempts):
+        u = random.choice(nodes)
+        neighbors = list(graph.neighbors(u))
+        if not neighbors:
+            continue
+
+        v = random.choice(neighbors)
+
+        # 第一步：进行少量测试（比如10次）快速筛选候选对
+        u_test_v_all_zero = True
+        for _ in range(10):  # 减少测试次数，快速筛选
+            result = pmc_test(u, v, fault_set)
+            if result != 0:
+                u_test_v_all_zero = False
+                break
+
+        v_test_u_all_zero = True
+        for _ in range(10):  # 减少测试次数，快速筛选
+            result = pmc_test(v, u, fault_set)
+            if result != 0:
+                v_test_u_all_zero = False
+                break
+
+        if u_test_v_all_zero and v_test_u_all_zero:
+            if verbose:
+                print(f"找到候选对 {u} 和 {v}，初步测试通过")
+            # 第二步：进行严格的验证
+            if verify_reliable_pair(u, v, graph, fault_set, verbose=verbose):
+                return u, v
+            else:
+                if verbose:
+                    print(f"候选对 {u} 和 {v} 验证失败，继续寻找...")
+
+    return None, None
+
+
+def verify_reliable_pair(u, v, graph, fault_set, verification_attempts=5, verbose=False):
+    if verbose:
+        print(f"严格验证节点对({u}, {v})")
+
+
+    consistent_count = 0
+
+    for attempt in range(verification_attempts):
+        # 每次验证进行100次测试（比初步筛选更严格）
+        u_test_v_results = []
+        v_test_u_results = []
+
+        for _ in range(100):
+            u_test_v_results.append(pmc_test(u, v, fault_set))
+            v_test_u_results.append(pmc_test(v, u, fault_set))
+
+        # 改为检查大多数结果为0，而不是全部（降低验证严格度）
+        u_consistent = sum(1 for result in u_test_v_results if result == 0) >= 90  # 90%通过即可
+        v_consistent = sum(1 for result in v_test_u_results if result == 0) >= 90  # 90%通过即可
+
+        if u_consistent and v_consistent:
+            consistent_count += 1
+            if verbose:
+                print(f"验证尝试 {attempt + 1}: 通过")
+        else:
+            if verbose:
+                print(f"验证尝试 {attempt + 1}: 失败")
+
+    reliability_ratio = consistent_count / verification_attempts
+    if verbose:
+        print(f"验证可靠性比例: {reliability_ratio:.2f}")
+
+    return reliability_ratio >= 0.7  # 70%以上的验证通过
+
+
+def pmc_diagnosis_algorithm(graph, fault_set, verbose=False, use_error_test=False, error_rate=0.01):
+    test_function = pmc_test_with_error if use_error_test else pmc_test
+
+    # 初始化集合
+    fault_free_queue = deque()
+    diagnosed_fault_set = set()
+    diagnosed_fault_free_set = set()
+    all_nodes = set(graph.nodes())
+
+    if verbose:
+        print("正在寻找可靠无故障邻居对...")
+    u, v = find_reliable_pair(graph, fault_set, verbose=verbose)
+
+    if u is None:
+        if verbose:
+            print("警告: 未能找到可靠的无故障邻居对")
+        return diagnosed_fault_free_set, diagnosed_fault_set
+
+    if verbose:
+        print(f"找到并验证可靠无故障邻居对: {u} 和 {v}")
+    fault_free_queue.append(u)
+    fault_free_queue.append(v)
+    diagnosed_fault_free_set.add(u)
+    diagnosed_fault_free_set.add(v)
+                           
+    tested_pairs = set()  
+
+    while fault_free_queue:
+        current = fault_free_queue.popleft()
+        for neighbor in graph.neighbors(current):
+            if neighbor in diagnosed_fault_free_set or neighbor in diagnosed_fault_set:
+                continue
+
+            if (current, neighbor) in tested_pairs:
+                continue
+
+            tested_pairs.add((current, neighbor))
+
+            if use_error_test:
+                result = pmc_test_with_error(current, neighbor, fault_set, error_rate)
+            else:
+                result = pmc_test(current, neighbor, fault_set)
+
+            if result == 0:
+                if neighbor not in diagnosed_fault_free_set:
+                    fault_free_queue.append(neighbor)
+                    diagnosed_fault_free_set.add(neighbor)
+                    if verbose:
+                        print(f"诊断: 节点 {neighbor} 无故障 (由 {current} 测试)")
+            else:  # result == 1
+                diagnosed_fault_set.add(neighbor)
+                if verbose:
+                    print(f"诊断: 节点 {neighbor} 有故障 (由 {current} 测试)")
+
+    undiagnosed_nodes = all_nodes - diagnosed_fault_free_set - diagnosed_fault_set
+    if verbose:
+        print(f"\n无故障队列处理完成，未被诊断的节点数量: {len(undiagnosed_nodes)}")
+        if len(undiagnosed_nodes) > 0:
+            print(f"未被诊断的节点: {format_node_set(undiagnosed_nodes)}")
+
+    return diagnosed_fault_free_set, diagnosed_fault_set
+
+
+def evaluate_diagnosis_with_details(true_fault_set, diagnosed_fault_set, diagnosed_fault_free_set, all_nodes, graph,
+                                    trial_num=0):
+    true_fault_free_set = set(all_nodes) - true_fault_set
+
+    true_positive = len(diagnosed_fault_set & true_fault_set)
+    false_positive = len(diagnosed_fault_set - true_fault_set)
+    true_negative = len(diagnosed_fault_free_set & true_fault_free_set)
+    false_negative = len(diagnosed_fault_free_set - true_fault_free_set)
+
+    accuracy = (true_positive + true_negative) / len(all_nodes) if len(all_nodes) > 0 else 0
+    precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0
+    recall = true_positive / len(true_fault_set) if len(true_fault_set) > 0 else 1
+    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    tnr = true_negative / len(true_fault_free_set) if len(true_fault_free_set) > 0 else 1
+
+    false_positives = diagnosed_fault_set - true_fault_set  # 误诊为故障的无故障节点
+    false_negatives = true_fault_set - diagnosed_fault_set  # 漏诊的故障节点
+    correct_diagnoses = (diagnosed_fault_set & true_fault_set) | (diagnosed_fault_free_set & true_fault_free_set)
+
+    isolated_fault_free_nodes = 0
+    for node in true_fault_free_set:
+        if has_all_faulty_neighbors(node, true_fault_set, graph):
+            isolated_fault_free_nodes += 1
+
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1_score,
+        'tnr': tnr,  # 新增TNR指标
+        'true_positive': true_positive,
+        'false_positive': false_positive,
+        'true_negative': true_negative,
+        'false_negative': false_negative,
+        'false_positives': false_positives,
+        'false_negatives': false_negatives,
+        'correct_diagnoses': correct_diagnoses,
+        'true_fault_set': true_fault_set,
+        'diagnosed_fault_set': diagnosed_fault_set,
+        'isolated_fault_free_nodes': isolated_fault_free_nodes
+    }
+
+
+def format_node_set(node_set, max_display=10):
+    """
+    格式化节点集合的显示，限制最大显示数量
+    """
+    nodes_list = sorted(list(node_set))
+    if len(nodes_list) <= max_display:
+        return str(nodes_list)
+    else:
+        return str(nodes_list[:max_display]) + f" ... (共{len(nodes_list)}个)"
+
+
+def run_multiple_trials(n, num_faults, num_trials=100, verbose_single=False, use_error_test=False, error_rate=0.01,
+                        fault_level=1.0, h=0, r=2):
+    print(f"正在生成 3-ary {n}-cube...")
+    graph = generate_3_ary_n_cube(n)
+    nodes = list(graph.nodes())
+    print(f"生成完成: 顶点数 = {len(nodes)}, 边数 = {graph.number_of_edges()}")
+
+    all_results = []
+    successful_trials = 0
+    valid_fault_sets = 0  # 统计有效故障集的数量
+
+    print(f"\n开始进行 {num_trials} 次试验...")
+    start_time = time.time()
+
+    for trial in range(num_trials):
+        if (trial + 1) % 10 == 0:
+            elapsed_time = time.time() - start_time
+            print(f"已完成 {trial + 1}/{num_trials} 次试验, 用时: {elapsed_time:.2f}秒")
+
+        true_fault_set = initialize_fault_set_with_condition(graph, num_faults, h, r,
+                                                             verbose=verbose_single and trial == 0)
+
+        if is_h_extra_r_component_cut(graph, true_fault_set, h, r):
+            valid_fault_sets += 1
+
+        if verbose_single and trial == 0:
+            print(f"\n=== 第{trial + 1}次试验详细过程 ===")
+            print(f"真实故障节点坐标: {format_node_set(true_fault_set)}")
+
+            if is_h_extra_r_component_cut(graph, true_fault_set, h, r):
+                print(f"故障集满足h={h}, r={r}条件")
+            else:
+                print(f"故障集不满足h={h}, r={r}条件")
+
+            isolated_nodes = []
+            for node in set(nodes) - true_fault_set:
+                if has_all_faulty_neighbors(node, true_fault_set, graph):
+                    isolated_nodes.append(node)
+            if isolated_nodes:
+                print(f"存在{len(isolated_nodes)}个无故障节点其所有邻居都是故障节点: {format_node_set(isolated_nodes)}")
+
+            diagnosed_fault_free_set, diagnosed_fault_set = pmc_diagnosis_algorithm(
+                graph, true_fault_set, verbose=True, use_error_test=use_error_test, error_rate=error_rate)
+            print(f"诊断出的故障节点坐标: {format_node_set(diagnosed_fault_set)}")
+        else:
+            diagnosed_fault_free_set, diagnosed_fault_set = pmc_diagnosis_algorithm(
+                graph, true_fault_set, verbose=False, use_error_test=use_error_test, error_rate=error_rate)
+
+        evaluation = evaluate_diagnosis_with_details(true_fault_set, diagnosed_fault_set, diagnosed_fault_free_set,
+                                                     nodes, graph, trial)
+        all_results.append(evaluation)
+
+        if len(diagnosed_fault_free_set) > 0:
+            successful_trials += 1
+
+        if verbose_single and trial == 0 or (
+                len(evaluation['false_positives']) > 0 or len(evaluation['false_negatives']) > 0):
+            print(f"\n第{trial + 1}次试验误诊分析:")
+            if len(evaluation['false_positives']) > 0:
+                print(f"  无故障节点被误诊为故障节点: {format_node_set(evaluation['false_positives'])}")
+            else:
+                print(f"  无故障节点被误诊为故障节点: 无")
+
+            if len(evaluation['false_negatives']) > 0:
+                print(f"  故障节点被误诊为无故障节点: {format_node_set(evaluation['false_negatives'])}")
+            else:
+                print(f"  故障节点被误诊为无故障节点: 无")
+    avg_accuracy = sum(r['accuracy'] for r in all_results) / num_trials
+    avg_precision = sum(r['precision'] for r in all_results) / num_trials
+    avg_recall = sum(r['recall'] for r in all_results) / num_trials
+    avg_f1_score = sum(r['f1_score'] for r in all_results) / num_trials
+    avg_tnr = sum(r['tnr'] for r in all_results) / num_trials  # 新增平均TNR
+    avg_true_positive = sum(r['true_positive'] for r in all_results) / num_trials
+    avg_false_positive = sum(r['false_positive'] for r in all_results) / num_trials
+    avg_true_negative = sum(r['true_negative'] for r in all_results) / num_trials
+    avg_false_negative = sum(r['false_negative'] for r in all_results) / num_trials
+    avg_isolated_nodes = sum(r['isolated_fault_free_nodes'] for r in all_results) / num_trials
+
+
+    # 统计误诊情况
+    trials_with_false_positives = sum(1 for r in all_results if len(r['false_positives']) > 0)
+    trials_with_false_negatives = sum(1 for r in all_results if len(r['false_negatives']) > 0)
+    perfect_trials = sum(1 for r in all_results if len(r['false_positives']) == 0 and len(r['false_negatives']) == 0)
+    trials_with_isolated_nodes = sum(1 for r in all_results if r['isolated_fault_free_nodes'] > 0)
+
+    return {
+        'avg_accuracy': avg_accuracy,
+        'avg_precision': avg_precision,
+        'avg_recall': avg_recall,
+        'avg_f1_score': avg_f1_score,
+        'avg_tnr': avg_tnr,  # 新增平均TNR
+        'avg_true_positive': avg_true_positive,
+        'avg_false_positive': avg_false_positive,
+        'avg_true_negative': avg_true_negative,
+        'avg_false_negative': avg_false_negative,
+        'avg_isolated_nodes': avg_isolated_nodes,
+        'accuracy_std': accuracy_std,
+        'precision_std': precision_std,
+        'recall_std': recall_std,
+        'tnr_std': tnr_std,  # 新增TNR标准差
+        'success_rate': successful_trials / num_trials,
+        'valid_fault_sets': valid_fault_sets,  # 新增有效故障集统计
+        'trials_with_false_positives': trials_with_false_positives,
+        'trials_with_false_negatives': trials_with_false_negatives,
+        'perfect_trials': perfect_trials,
+        'trials_with_isolated_nodes': trials_with_isolated_nodes,
+        'all_results': all_results,
+        'graph_info': {
+            'nodes': len(nodes),
+            'edges': graph.number_of_edges(),
+            'faults': num_faults
+        }
+    }
+
+
+def main():
+    
+    print("=" * 60)
+    print("   PMC模型故障诊断算法（h-extra-r-component点割版本）")
+    print("=" * 60)
+
+    # 输入参数
+    try:
+        n = int(input("请输入维度 n (n ≥ 1): "))
+        if n < 1:
+            print("错误: n 必须 ≥ 1")
+            return
+
+        # 生成3-ary n-cube（用于获取节点数）
+        test_graph = generate_3_ary_n_cube(n)
+        nodes = list(test_graph.nodes())
+        total_nodes = len(nodes)
+
+        # 输入故障节点百分比
+        fault_percentage = float(input("请输入故障节点百分比 (0-100): "))
+        if fault_percentage < 0 or fault_percentage > 100:
+            print("错误: 故障节点百分比必须在 0-100 之间")
+            return
+
+        # 计算故障节点数量
+        num_faults = int(total_nodes * fault_percentage / 100)
+        if num_faults < 1:
+            num_faults = 1
+        if num_faults >= total_nodes:
+            num_faults = total_nodes - 1
+
+        print(f"根据 {fault_percentage}% 的故障率，计算得到故障节点数: {num_faults}")
+
+        # 输入h和r参数
+        h = int(input("请输入h值 (h ≥ 0): "))
+        if h < 0:
+            print("错误: h 必须 ≥ 0")
+            return
+
+        r = int(input("请输入r值 (r ≥ 2): "))
+        if r < 2:
+            print("错误: r 必须 ≥ 2")
+            return
+
+        # 输入试验次数
+        num_trials = int(input("请输入试验次数 (默认100): ") or "100")
+        if num_trials < 1:
+            print("错误: 试验次数必须 ≥ 1")
+            return
+
+        use_error_test = input("是否使用带误差的测试? (y/n, 默认n): ").lower() == 'y'
+        error_rate = 0.01  # 默认错误率1%
+        if use_error_test:
+            try:
+                error_rate_input = float(input("请输入错误率 (0-1, 默认0.01): ") or "0.01")
+                if 0 <= error_rate_input <= 1:
+                    error_rate = error_rate_input
+                else:
+                    print("错误率必须在0-1之间，使用默认值0.01")
+            except ValueError:
+                print("输入无效，使用默认错误率0.01")
+
+        try:
+            fault_level = float(input("请输入故障级别 (0-1, 默认1.0): ") or "1.0")
+            if not 0 <= fault_level <= 1:
+                print("故障级别必须在0-1之间，使用默认值1.0")
+                fault_level = 1.0
+        except ValueError:
+            print("输入无效，使用默认故障级别1.0")
+            fault_level = 1.0
+
+        show_single_verbose = input("是否显示单次试验详细过程? (y/n, 默认n): ").lower() == 'y'
+
+        print(f"\n试验配置信息:")
+        print(f"维度 n: {n}")
+        print(f"故障节点百分比: {fault_percentage}%")
+        print(f"故障节点数: {num_faults}")
+        print(f"h值: {h}")
+        print(f"r值: {r}")
+        print(f"试验次数: {num_trials}")
+        print(f"总节点数: {total_nodes}")
+        print(f"无故障节点数: {total_nodes - num_faults}")
+
+        results = run_multiple_trials(n, num_faults, num_trials, show_single_verbose,
+                                      use_error_test, error_rate, fault_level, h, r)
+
+        print("\n" + "=" * 60)
+        print(f"             {num_trials}次试验统计分析")
+        print("=" * 60)
+
+        print(f"\n图结构信息:")
+        print(f"总节点数: {results['graph_info']['nodes']}")
+        print(f"边数: {results['graph_info']['edges']}")
+        print(f"故障节点数: {results['graph_info']['faults']}")
+        print(f"故障节点百分比: {results['graph_info']['faults'] / results['graph_info']['nodes'] * 100:.2f}%")
+        print(f"满足h={h}, r={r}条件的故障集比例: {results['valid_fault_sets']}/{num_trials}")
+
+        print(f"\n平均诊断统计:")
+        print(f"平均真正例(TP): {results['avg_true_positive']:.2f}")
+        print(f"平均假正例(FP): {results['avg_false_positive']:.2f}")
+        print(f"平均真反例(TN): {results['avg_true_negative']:.2f}")
+        print(f"平均假反例(FN): {results['avg_false_negative']:.2f}")
+
+        print(f"平均准确率(ACCR): {results['avg_accuracy']:.4f} (±{results['accuracy_std']:.4f})")
+        print(f"平均精确率(Precision): {results['avg_precision']:.4f} (±{results['precision_std']:.4f})")
+        print(f"平均召回率(TPR): {results['avg_recall']:.4f} (±{results['recall_std']:.4f})")
+        # print(f"平均F1分数(F1-score): {results['avg_f1_score']:.4f}")
+        print(f"平均真负率(TNR): {results['avg_tnr']:.4f} (±{results['tnr_std']:.4f})")
+        print(f"平均F1分数(F1-score): {results['avg_f1_score']:.4f}")
+
+    except ValueError:
+        print("错误: 请输入有效的数字")
+    except Exception as e:
+        print(f"程序执行出错: {e}")
+
+
+if __name__ == "__main__":
+    main()
